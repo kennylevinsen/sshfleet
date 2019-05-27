@@ -1,0 +1,16 @@
+address: :2222
+hostkey: |
+  -----BEGIN EC PRIVATE KEY-----
+  MHcCAQEEIJEDt/lHs7jSUNEMbX+Swp6xa8ZiamPFoYsTZgP+We8DoAoGCCqGSM49
+  AwEHoUQDQgAEUvK6aRbBnFVsXvpJ9bwUDEI3c/phJAIsjk2dA+YNiFVQq20Xkefl
+  FqPJeBriA2EMGkU2AmKGFK45PwRjKI10bA==
+  -----END EC PRIVATE KEY-----
+anyMaster: true
+anyNode: true
+
+users:
+    - publicKey: "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBPoWImSrY0Rt33Rg97HkDS3r7mdcFn5EJUv/dxiRWD9aPQUm8wp7buZDhpjb32Dt2PjKnNB6PrNOj7ORDFYEhRg="
+      name: "me"
+nodeUsers:
+    - publicKey: "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBPoWImSrY0Rt33Rg97HkDS3r7mdcFn5EJUv/dxiRWD9aPQUm8wp7buZDhpjb32Dt2PjKnNB6PrNOj7ORDFYEhRg="
+      name: "me"
