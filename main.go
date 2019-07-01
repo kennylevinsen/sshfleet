@@ -6,8 +6,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +27,10 @@ type Client struct {
 	address string
 	name string
 	id uuid.UUID
+	connectionTime time.Time
+
+	lastPingLock sync.Mutex
+	lastPingTime time.Time
 }
 
 type User struct {
@@ -43,6 +51,8 @@ type Server struct {
 	anyMaster bool
 
 	nodeKeepAlive time.Duration
+
+	clientWaiter *sync.Cond
 }
 
 func (s *Server) auth(c ssh.ConnMetadata, key ssh.PublicKey) (*sshmux.User, error) {
@@ -100,6 +110,236 @@ func (s *Server) setup(session *sshmux.Session) error {
 		})
 	}
 	return nil
+}
+
+func (s *Server) interactive(comm io.ReadWriter, session *sshmux.Session) (*sshmux.Remote, error) {
+	fmt.Fprintf(comm, "Welcome to sshfleet, %s\r\n\r\n", session.Conn.User())
+	fmt.Fprintf(comm, "%d servers connected at the current time.\r\n\r\n", len(s.nodes))
+	fmt.Fprintf(comm, "Type 'help' to see available commands\r\n")
+
+	// Beware, nasty input parsing loop
+	for {
+		b := make([]byte, 1)
+		var (
+			user string
+			n   int
+			err error
+			esc []byte
+			history [][]byte
+		)
+		history = append(history, []byte("> "))
+		historyPos := len(history)-1
+
+		fmt.Fprintf(comm, "\r%s", history[historyPos])
+		for {
+			if err != nil {
+				return nil, err
+			}
+			n, err = comm.Read(b)
+			if n == 1 {
+				ol := len(history[historyPos])
+
+				// Escape codes (arrow up/down for history)
+				if esc != nil {
+					esc = append(esc, b[0])
+					if len(esc) >= 2 {
+						if esc[1] == 91 {
+						} else {
+							esc = nil
+							continue
+						}
+					}
+					if len(esc) >= 3 {
+						if esc[2] == 65 {
+							if historyPos != 0 {
+								historyPos -= 1
+							}
+						} else if esc[2] == 66 {
+							if historyPos < len(history) -1 {
+								historyPos++
+							}
+						} else if esc[2] == 67 {
+						} else if esc[2] == 68 {
+						} else if esc[2] == 51 {
+						} else {
+							esc = nil
+						}
+						esc = nil
+						goto print
+					}
+					continue
+				}
+				switch b[0] {
+				case 27:
+					esc = []byte{27}
+					continue
+				case 0x7F, 0x08:
+					if len(history[historyPos]) > 2 {
+						history[historyPos] = history[historyPos][0:len(history[historyPos])-1]
+					}
+				case '\r':
+					fmt.Fprintf(comm, "\r\n")
+
+					s.nodeLock.Lock()
+					nodes := make([]*Client, len(s.nodes))
+					copy(nodes, s.nodes)
+					s.nodeLock.Unlock()
+
+					sort.Slice(nodes, func(i, j int) bool {
+						if nodes[i].name == "" && nodes[j].name == "" {
+							return bytes.Compare(nodes[i].id[:], nodes[j].id[:]) == -1
+						}
+						if nodes[i].name == "" {
+							return true
+						} else if nodes[j].name == "" {
+							return false
+						}
+
+						return nodes[i].name < nodes[j].name
+					})
+
+					input := string(history[historyPos])[2:]
+					sp := strings.Split(input, " ")
+					switch sp[0] {
+					case "":
+					case "u", "user", "username":
+						if len(sp) != 2 {
+							fmt.Fprintf(comm, "error: command expects username as second parameter\r\n")
+						}
+						user = sp[1]
+						fmt.Fprintf(comm, "username set to %s\r\n", user)
+					case "l",  "list":
+						for i, v := range nodes {
+							v.lastPingLock.Lock()
+							t := v.lastPingTime
+							v.lastPingLock.Unlock()
+							fmt.Fprintf(comm, "    [%d] id: %s\r\n", i, v.id.String())
+							fmt.Fprintf(comm, "        name: %s\r\n", v.sshConn.User())
+							fmt.Fprintf(comm, "        addr: %s\r\n", v.sshConn.RemoteAddr().String())
+							fmt.Fprintf(comm, "        connected: %s\r\n", v.connectionTime.String())
+							fmt.Fprintf(comm, "        lastPing: %s\r\n\r\n", t.String())
+						}
+					case "c", "connect":
+						if len(sp) != 2 {
+							fmt.Fprintf(comm, "error: command expects server as second parameter\r\n")
+						}
+						num, err := strconv.ParseInt(sp[1], 10, 64)
+						isNum := err == nil
+						for idx, n := range nodes {
+							if n.name == sp[1] || n.id.String() == sp[1] || (isNum && num == int64(idx)) {
+								return &sshmux.Remote{
+									Address: n.id.String() + ":22",
+								}, nil
+							}
+						}
+
+						fmt.Fprintf(comm, "No such server. Please try again\r\n")
+					case "k", "kill":
+						if len(sp) != 2 {
+							fmt.Fprintf(comm, "error: command expects server as second parameter\r\n")
+						}
+						var c *Client
+
+						num, err := strconv.ParseInt(sp[1], 10, 64)
+						isNum := err == nil
+						for idx, n := range nodes {
+							if n.name == input || n.id.String() == input || (isNum && num == int64(idx)) {
+								c = n
+								break
+							}
+						}
+
+						if c == nil {
+							fmt.Fprintf(comm, "No such server. Please try again\r\n") 
+						} else {
+							fmt.Fprintf(comm, "Kicking %s\r\n", c.id.String())
+							c.sshConn.Close() 
+						}
+					case "m", "monitor":
+						now := time.Now()
+						fmt.Fprintf(comm, "Waiting for new connections\r\n")
+						s.clientWaiter.L.Lock()
+						s.clientWaiter.Wait()
+						s.clientWaiter.L.Unlock()
+						fmt.Fprintf(comm, "New connections received\r\n")
+
+						s.nodeLock.Lock()
+						nodes := make([]*Client, len(s.nodes))
+						copy(nodes, s.nodes)
+						s.nodeLock.Unlock()
+
+						sort.Slice(nodes, func(i, j int) bool {
+							if nodes[i].name == "" && nodes[j].name == "" {
+								return bytes.Compare(nodes[i].id[:], nodes[j].id[:]) == -1
+							}
+							if nodes[i].name == "" {
+								return true
+							} else if nodes[j].name == "" {
+								return false
+							}
+
+							return nodes[i].name < nodes[j].name
+						})
+						newNodes := make([]*Client, 0, len(nodes))
+						for _, n := range nodes {
+							if n.connectionTime.After(now) {
+								newNodes = append(newNodes, n)
+							}
+						}
+						for i, v := range newNodes {
+							v.lastPingLock.Lock()
+							t := v.lastPingTime
+							v.lastPingLock.Unlock()
+							fmt.Fprintf(comm, "    [%d] id: %s\r\n", i, v.id.String())
+							fmt.Fprintf(comm, "        name: %s\r\n", v.sshConn.User())
+							fmt.Fprintf(comm, "        addr: %s\r\n", v.sshConn.RemoteAddr().String())
+							fmt.Fprintf(comm, "        connected: %s\r\n", v.connectionTime.String())
+							fmt.Fprintf(comm, "        lastPing: %s\r\n\r\n", t.String())
+						}
+					case "h", "help":
+						fmt.Fprintf(comm, "Available commands:\r\n")
+						fmt.Fprintf(comm, "   u, user, username : Set username to the specified string\r\n")
+						fmt.Fprintf(comm, "   l, list           : List known nodes\r\n")
+						fmt.Fprintf(comm, "   c, connect        : Connect to the specified node\r\n")
+						fmt.Fprintf(comm, "   k, kill           : Kill the specified node connection\r\n")
+						fmt.Fprintf(comm, "   m, monitor        : Monitor client connections\r\n")
+						fmt.Fprintf(comm, "   q, quit           : Disconnect\r\n")
+					case "q", "quit":
+						fmt.Fprintf(comm, "\r\nGoodbye\r\n")
+						return nil, errors.New("user terminated session")
+					default:
+						fmt.Fprintf(comm, "Unknown command: %s\r\n", sp[0])
+					}
+
+					if historyPos != len(history)-1 {
+						history = append(history, history[historyPos])
+					}
+					history = append(history, []byte("> "))
+					if len(history) > 100 {
+						history = history[len(history)-100:len(history)-1]
+					}
+					historyPos = len(history)-1
+					fmt.Fprintf(comm, "\r%s", history[historyPos])
+					continue
+				case 0x04, 0x03:
+					fmt.Fprintf(comm, "\r\nGoodbye\r\n")
+					return nil, errors.New("user terminated session")
+				default:
+					history[historyPos] = append(history[historyPos], b[0])
+				}
+print:
+				fmt.Fprintf(comm, "\r%s", history[historyPos])
+				if ol > len(history[historyPos]) {
+					padding := ""
+					for i := ol; i > len(history[historyPos]); i-- {
+						padding += " "
+					}
+					padding += fmt.Sprintf("\033[%dD", ol - len(history[historyPos]))
+					fmt.Fprintf(comm, "%s", padding)
+				}
+			}
+		}
+	}
 }
 
 func (s *Server) dialer(network, address string) (net.Conn, error) {
@@ -226,11 +466,15 @@ func (s *Server) HandleConn(c net.Conn) error {
 		address: c.RemoteAddr().String(),
 		name: sshConn.User(),
 		id: uuid.New(),
+		connectionTime: time.Now(),
+		lastPingTime: time.Now(),
 	}
 
 	s.nodeLock.Lock()
 	s.nodes = append(s.nodes, client)
 	s.nodeLock.Unlock()
+
+	s.clientWaiter.Broadcast()
 
 	go func() {
 		for req := range reqs {
@@ -269,8 +513,17 @@ func (s *Server) HandleConn(c net.Conn) error {
 					sshConn.Close()
 					break
 				}
+
+				client.lastPingLock.Lock()
+				client.lastPingTime = time.Now()
+				client.lastPingLock.Unlock()
 			}
 		}()
+
+		if tc, ok := c.(*net.TCPConn); ok {
+			tc.SetKeepAlivePeriod(s.nodeKeepAlive)
+			tc.SetKeepAlive(true)
+		}
 	}
 
 	err = sshConn.Wait()
@@ -369,6 +622,7 @@ func main() {
 		anyNode: viper.GetBool("anyNode"),
 		anyMaster: viper.GetBool("anyMaster"),
 		nodeKeepAlive: time.Duration(viper.GetInt("nodeKeepAlive")) * time.Second,
+		clientWaiter: &sync.Cond{L: &sync.Mutex{}},
 	}
 
 	fleetServer.sshConfig = &ssh.ServerConfig{
@@ -411,6 +665,7 @@ func main() {
 		return nil
 	}
 	server.Dialer = fleetServer.dialer
+	server.Interactive = fleetServer.interactive
 
 	// Set up listener
 	l1, err := net.Listen("tcp", viper.GetString("address"))

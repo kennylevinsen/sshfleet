@@ -1,4 +1,5 @@
 address: :2222
+nodeAddress: :2200
 hostkey: |
   -----BEGIN EC PRIVATE KEY-----
   MHcCAQEEIJEDt/lHs7jSUNEMbX+Swp6xa8ZiamPFoYsTZgP+We8DoAoGCCqGSM49
@@ -7,6 +8,7 @@ hostkey: |
   -----END EC PRIVATE KEY-----
 anyMaster: true
 anyNode: true
+nodeKeepAlive: 10
 
 users:
     - publicKey: "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBPoWImSrY0Rt33Rg97HkDS3r7mdcFn5EJUv/dxiRWD9aPQUm8wp7buZDhpjb32Dt2PjKnNB6PrNOj7ORDFYEhRg="
