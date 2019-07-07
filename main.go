@@ -205,6 +205,7 @@ func (s *Server) interactive(comm io.ReadWriter, session *sshmux.Session) (*sshm
 					case "u", "user", "username":
 						if len(sp) != 2 {
 							fmt.Fprintf(comm, "error: command expects username as second parameter\r\n")
+							goto addhistory
 						}
 						user = sp[1]
 						fmt.Fprintf(comm, "username set to %s\r\n", user)
@@ -222,6 +223,7 @@ func (s *Server) interactive(comm io.ReadWriter, session *sshmux.Session) (*sshm
 					case "c", "connect":
 						if len(sp) != 2 {
 							fmt.Fprintf(comm, "error: command expects server as second parameter\r\n")
+							goto addhistory
 						}
 						num, err := strconv.ParseInt(sp[1], 10, 64)
 						isNum := err == nil
@@ -237,6 +239,7 @@ func (s *Server) interactive(comm io.ReadWriter, session *sshmux.Session) (*sshm
 					case "k", "kill":
 						if len(sp) != 2 {
 							fmt.Fprintf(comm, "error: command expects server as second parameter\r\n")
+							goto addhistory
 						}
 						var c *Client
 
@@ -311,6 +314,7 @@ func (s *Server) interactive(comm io.ReadWriter, session *sshmux.Session) (*sshm
 						fmt.Fprintf(comm, "Unknown command: %s\r\n", sp[0])
 					}
 
+addhistory:
 					if historyPos != len(history)-1 {
 						history = append(history, history[historyPos])
 					}
