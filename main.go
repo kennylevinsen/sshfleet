@@ -150,19 +150,15 @@ func (s *server) interactive(comm io.ReadWriter, session *sshmux.Session) (*sshm
 						}
 					}
 					if len(esc) >= 3 {
-						if esc[2] == 65 {
+						switch esc[2] {
+						case 65:
 							if historyPos != 0 {
 								historyPos -= 1
 							}
-						} else if esc[2] == 66 {
+						case 66:
 							if historyPos < len(history)-1 {
 								historyPos++
 							}
-						} else if esc[2] == 67 {
-						} else if esc[2] == 68 {
-						} else if esc[2] == 51 {
-						} else {
-							esc = nil
 						}
 						esc = nil
 						goto print
