@@ -16,38 +16,38 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/google/uuid"
 	"github.com/kennylevinsen/sshmux"
 	"github.com/spf13/viper"
 	"golang.org/x/crypto/ssh"
-	"github.com/google/uuid"
 )
 
-type Client struct {
-	sshConn ssh.Conn
-	address string
-	name string
-	id uuid.UUID
+type client struct {
+	sshConn        ssh.Conn
+	address        string
+	name           string
+	id             uuid.UUID
 	connectionTime time.Time
 
 	lastPingLock sync.Mutex
 	lastPingTime time.Time
 }
 
-type User struct {
+type user struct {
 	PublicKey string `json:"publicKey"`
 	Name      string `json:"name"`
 }
 
-type Server struct {
-	users []*sshmux.User
+type server struct {
+	users     []*sshmux.User
 	nodeUsers []*sshmux.User
 
 	sshConfig *ssh.ServerConfig
 
 	nodeLock sync.Mutex
-	nodes []*Client
+	nodes    []*client
 
-	anyNode bool
+	anyNode   bool
 	anyMaster bool
 
 	nodeKeepAlive time.Duration
@@ -55,7 +55,7 @@ type Server struct {
 	clientWaiter *sync.Cond
 }
 
-func (s *Server) auth(c ssh.ConnMetadata, key ssh.PublicKey) (*sshmux.User, error) {
+func (s *server) auth(c ssh.ConnMetadata, key ssh.PublicKey) (*sshmux.User, error) {
 	if s.anyMaster {
 		return nil, nil
 	}
@@ -73,7 +73,7 @@ func (s *Server) auth(c ssh.ConnMetadata, key ssh.PublicKey) (*sshmux.User, erro
 	return nil, errors.New("access denied")
 }
 
-func (s *Server) nodeAuth(c ssh.ConnMetadata, key ssh.PublicKey) (*sshmux.User, error) {
+func (s *server) nodeAuth(c ssh.ConnMetadata, key ssh.PublicKey) (*sshmux.User, error) {
 	if s.anyNode {
 		return nil, nil
 	}
@@ -91,7 +91,7 @@ func (s *Server) nodeAuth(c ssh.ConnMetadata, key ssh.PublicKey) (*sshmux.User, 
 	return nil, errors.New("access denied")
 }
 
-func (s *Server) setup(session *sshmux.Session) error {
+func (s *server) setup(session *sshmux.Session) error {
 	var username string
 	if session.User != nil {
 		username = session.User.Name
@@ -104,15 +104,15 @@ func (s *Server) setup(session *sshmux.Session) error {
 	defer s.nodeLock.Unlock()
 	for _, c := range s.nodes {
 		session.Remotes = append(session.Remotes, &sshmux.Remote{
-			Names: []string{c.id.String(), c.id.String() + ":22", c.sshConn.RemoteAddr().String(), c.sshConn.User(), c.sshConn.User() + ":22"},
+			Names:       []string{c.id.String(), c.id.String() + ":22", c.sshConn.RemoteAddr().String(), c.sshConn.User(), c.sshConn.User() + ":22"},
 			Description: fmt.Sprintf("%s (%s, %s)", c.id.String(), c.sshConn.User(), c.sshConn.RemoteAddr().String()),
-			Address: c.id.String() + ":22",
+			Address:     c.id.String() + ":22",
 		})
 	}
 	return nil
 }
 
-func (s *Server) interactive(comm io.ReadWriter, session *sshmux.Session) (*sshmux.Remote, error) {
+func (s *server) interactive(comm io.ReadWriter, session *sshmux.Session) (*sshmux.Remote, error) {
 	fmt.Fprintf(comm, "Welcome to sshfleet, %s\r\n\r\n", session.Conn.User())
 	fmt.Fprintf(comm, "%d servers connected at the current time.\r\n\r\n", len(s.nodes))
 	fmt.Fprintf(comm, "Type 'help' to see available commands\r\n")
@@ -121,14 +121,14 @@ func (s *Server) interactive(comm io.ReadWriter, session *sshmux.Session) (*sshm
 	for {
 		b := make([]byte, 1)
 		var (
-			user string
-			n   int
-			err error
-			esc []byte
+			user    string
+			n       int
+			err     error
+			esc     []byte
 			history [][]byte
 		)
 		history = append(history, []byte("> "))
-		historyPos := len(history)-1
+		historyPos := len(history) - 1
 
 		fmt.Fprintf(comm, "\r%s", history[historyPos])
 		for {
@@ -155,7 +155,7 @@ func (s *Server) interactive(comm io.ReadWriter, session *sshmux.Session) (*sshm
 								historyPos -= 1
 							}
 						} else if esc[2] == 66 {
-							if historyPos < len(history) -1 {
+							if historyPos < len(history)-1 {
 								historyPos++
 							}
 						} else if esc[2] == 67 {
@@ -175,13 +175,13 @@ func (s *Server) interactive(comm io.ReadWriter, session *sshmux.Session) (*sshm
 					continue
 				case 0x7F, 0x08:
 					if len(history[historyPos]) > 2 {
-						history[historyPos] = history[historyPos][0:len(history[historyPos])-1]
+						history[historyPos] = history[historyPos][0 : len(history[historyPos])-1]
 					}
 				case '\r':
 					fmt.Fprintf(comm, "\r\n")
 
 					s.nodeLock.Lock()
-					nodes := make([]*Client, len(s.nodes))
+					nodes := make([]*client, len(s.nodes))
 					copy(nodes, s.nodes)
 					s.nodeLock.Unlock()
 
@@ -209,7 +209,7 @@ func (s *Server) interactive(comm io.ReadWriter, session *sshmux.Session) (*sshm
 						}
 						user = sp[1]
 						fmt.Fprintf(comm, "username set to %s\r\n", user)
-					case "l",  "list":
+					case "l", "list":
 						for i, v := range nodes {
 							v.lastPingLock.Lock()
 							t := v.lastPingTime
@@ -241,7 +241,7 @@ func (s *Server) interactive(comm io.ReadWriter, session *sshmux.Session) (*sshm
 							fmt.Fprintf(comm, "error: command expects server as second parameter\r\n")
 							goto addhistory
 						}
-						var c *Client
+						var c *client
 
 						num, err := strconv.ParseInt(sp[1], 10, 64)
 						isNum := err == nil
@@ -253,10 +253,10 @@ func (s *Server) interactive(comm io.ReadWriter, session *sshmux.Session) (*sshm
 						}
 
 						if c == nil {
-							fmt.Fprintf(comm, "No such server. Please try again\r\n") 
+							fmt.Fprintf(comm, "No such server. Please try again\r\n")
 						} else {
 							fmt.Fprintf(comm, "Kicking %s\r\n", c.id.String())
-							c.sshConn.Close() 
+							c.sshConn.Close()
 						}
 					case "m", "monitor":
 						now := time.Now()
@@ -267,7 +267,7 @@ func (s *Server) interactive(comm io.ReadWriter, session *sshmux.Session) (*sshm
 						fmt.Fprintf(comm, "New connections received\r\n")
 
 						s.nodeLock.Lock()
-						nodes := make([]*Client, len(s.nodes))
+						nodes := make([]*client, len(s.nodes))
 						copy(nodes, s.nodes)
 						s.nodeLock.Unlock()
 
@@ -283,7 +283,7 @@ func (s *Server) interactive(comm io.ReadWriter, session *sshmux.Session) (*sshm
 
 							return nodes[i].name < nodes[j].name
 						})
-						newNodes := make([]*Client, 0, len(nodes))
+						newNodes := make([]*client, 0, len(nodes))
 						for _, n := range nodes {
 							if n.connectionTime.After(now) {
 								newNodes = append(newNodes, n)
@@ -314,15 +314,15 @@ func (s *Server) interactive(comm io.ReadWriter, session *sshmux.Session) (*sshm
 						fmt.Fprintf(comm, "Unknown command: %s\r\n", sp[0])
 					}
 
-addhistory:
+				addhistory:
 					if historyPos != len(history)-1 {
 						history = append(history, history[historyPos])
 					}
 					history = append(history, []byte("> "))
 					if len(history) > 100 {
-						history = history[len(history)-100:len(history)-1]
+						history = history[len(history)-100 : len(history)-1]
 					}
-					historyPos = len(history)-1
+					historyPos = len(history) - 1
 					fmt.Fprintf(comm, "\r%s", history[historyPos])
 					continue
 				case 0x04, 0x03:
@@ -331,14 +331,14 @@ addhistory:
 				default:
 					history[historyPos] = append(history[historyPos], b[0])
 				}
-print:
+			print:
 				fmt.Fprintf(comm, "\r%s", history[historyPos])
 				if ol > len(history[historyPos]) {
 					padding := ""
 					for i := ol; i > len(history[historyPos]); i-- {
 						padding += " "
 					}
-					padding += fmt.Sprintf("\033[%dD", ol - len(history[historyPos]))
+					padding += fmt.Sprintf("\033[%dD", ol-len(history[historyPos]))
 					fmt.Fprintf(comm, "%s", padding)
 				}
 			}
@@ -346,13 +346,13 @@ print:
 	}
 }
 
-func (s *Server) dialer(network, address string) (net.Conn, error) {
+func (s *server) dialer(network, address string) (net.Conn, error) {
 	log.Printf("Asking for %s %s", network, address)
 	if network != "tcp" {
 		return nil, fmt.Errorf("unknown network %s", network)
 	}
 
-	var c *Client
+	var c *client
 	s.nodeLock.Lock()
 	for _, node := range s.nodes {
 		if address == (node.id.String() + ":22") {
@@ -368,20 +368,21 @@ func (s *Server) dialer(network, address string) (net.Conn, error) {
 	return s.connectTo(c.sshConn)
 }
 
-type FakeAddr struct {}
-func (FakeAddr) Network() string { return "tcp" }
-func (FakeAddr) String() string { return "" }
+type fakeAddr struct{}
 
-type SSHSortaConn struct {
+func (fakeAddr) Network() string { return "tcp" }
+func (fakeAddr) String() string  { return "" }
+
+type sshSortaConn struct {
 	net.Conn
 	sshChannel ssh.Channel
 }
 
-func (s *SSHSortaConn) Read(data []byte) (int, error) { return s.sshChannel.Read(data) }
-func (s *SSHSortaConn) Write(data []byte) (int, error) { return s.sshChannel.Write(data) }
-func (s *SSHSortaConn) Close() error { return s.sshChannel.Close() }
-func (SSHSortaConn) RemoteAddr() net.Addr { return FakeAddr{} }
-func (SSHSortaConn) LocalAddr() net.Addr { return FakeAddr{} }
+func (s *sshSortaConn) Read(data []byte) (int, error)  { return s.sshChannel.Read(data) }
+func (s *sshSortaConn) Write(data []byte) (int, error) { return s.sshChannel.Write(data) }
+func (s *sshSortaConn) Close() error                   { return s.sshChannel.Close() }
+func (sshSortaConn) RemoteAddr() net.Addr              { return fakeAddr{} }
+func (sshSortaConn) LocalAddr() net.Addr               { return fakeAddr{} }
 
 // https://tools.ietf.org/html/rfc4254
 type channelOpenForwardMsg struct {
@@ -391,7 +392,7 @@ type channelOpenForwardMsg struct {
 	LPort uint32
 }
 
-func (s *Server) connectTo(sshconn ssh.Conn) (net.Conn, error) {
+func (s *server) connectTo(sshconn ssh.Conn) (net.Conn, error) {
 	log.Printf("Connecting to node")
 	ch, reqs, err := sshconn.OpenChannel("forwarded-tcpip", ssh.Marshal(
 		channelOpenForwardMsg{
@@ -407,7 +408,7 @@ func (s *Server) connectTo(sshconn ssh.Conn) (net.Conn, error) {
 
 	go ssh.DiscardRequests(reqs)
 
-	return &SSHSortaConn{sshChannel: ch}, nil
+	return &sshSortaConn{sshChannel: ch}, nil
 }
 
 // https://tools.ietf.org/html/rfc4254
@@ -416,7 +417,7 @@ type forwardTcpMsg struct {
 	Port uint32
 }
 
-func (s *Server) NodeAuth(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+func (s *server) NodeAuth(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 	k := key.Marshal()
 	t := key.Type()
 	perm := &ssh.Permissions{
@@ -453,7 +454,7 @@ func (p *publicKey) Verify([]byte, *ssh.Signature) error {
 	return errors.New("verify not implemented")
 }
 
-func (s *Server) HandleConn(c net.Conn) error {
+func (s *server) HandleConn(c net.Conn) error {
 	sshConn, chans, reqs, err := ssh.NewServerConn(c, s.sshConfig)
 	if err != nil {
 		c.Close()
@@ -465,32 +466,30 @@ func (s *Server) HandleConn(c net.Conn) error {
 		return fmt.Errorf("no permissions")
 	}
 
-	client := &Client{
-		sshConn: sshConn,
-		address: c.RemoteAddr().String(),
-		name: sshConn.User(),
-		id: uuid.New(),
+	cl := &client{
+		sshConn:        sshConn,
+		address:        c.RemoteAddr().String(),
+		name:           sshConn.User(),
+		id:             uuid.New(),
 		connectionTime: time.Now(),
-		lastPingTime: time.Now(),
+		lastPingTime:   time.Now(),
 	}
 
 	s.nodeLock.Lock()
-	s.nodes = append(s.nodes, client)
+	s.nodes = append(s.nodes, cl)
 	s.nodeLock.Unlock()
 
 	s.clientWaiter.Broadcast()
 
 	go func() {
 		for req := range reqs {
+			log.Printf("Request from %v: %s", cl.id, req.Type)
 			switch req.Type {
 			case "tcpip-forward":
 				var msg forwardTcpMsg
 				ssh.Unmarshal(req.Payload, &msg)
-				if msg.Addr != "sshfleet" && msg.Port != 22 {
-					if req.WantReply {
-						req.Reply(false, []byte{})
-					}
-					continue
+				if req.WantReply {
+					req.Reply(msg.Addr == "sshfleet" && msg.Port == 22, []byte{})
 				}
 			case "keepalive@openssh.com":
 				if req.WantReply {
@@ -504,6 +503,7 @@ func (s *Server) HandleConn(c net.Conn) error {
 
 	go func() {
 		for newChannel := range chans {
+			log.Printf("Channel from %v: %s", cl.id, newChannel.ChannelType())
 			newChannel.Reject(ssh.UnknownChannelType, "connection flow not supported by sshfleet")
 		}
 	}()
@@ -518,9 +518,9 @@ func (s *Server) HandleConn(c net.Conn) error {
 					break
 				}
 
-				client.lastPingLock.Lock()
-				client.lastPingTime = time.Now()
-				client.lastPingLock.Unlock()
+				cl.lastPingLock.Lock()
+				cl.lastPingTime = time.Now()
+				cl.lastPingLock.Unlock()
 			}
 		}()
 
@@ -534,7 +534,7 @@ func (s *Server) HandleConn(c net.Conn) error {
 
 	s.nodeLock.Lock()
 	for i := 0; i < len(s.nodes); i++ {
-		if s.nodes[i] == client {
+		if s.nodes[i] == cl {
 			s.nodes = append(s.nodes[:i], s.nodes[i+1:]...)
 			break
 		}
@@ -543,7 +543,7 @@ func (s *Server) HandleConn(c net.Conn) error {
 	return err
 }
 
-func (s *Server) Serve(l net.Listener) error {
+func (s *server) Serve(l net.Listener) error {
 	for {
 		conn, err := l.Accept()
 		if err != nil {
@@ -552,13 +552,13 @@ func (s *Server) Serve(l net.Listener) error {
 
 		go s.HandleConn(conn)
 	}
-} 
+}
 
 var configFile = flag.String("config", "", "User-supplied configuration file to use")
 
 func parseUsers(key string) ([]*sshmux.User, error) {
 	var users []*sshmux.User
-	us := make([]User, 0)
+	us := make([]user, 0)
 	err := viper.UnmarshalKey(key, &us)
 	if err != nil {
 		return nil, err
@@ -592,10 +592,10 @@ func main() {
 	viper.SetDefault("anyMaster", false)
 	viper.SetDefault("nodeKeepAlive", 30)
 
-	viper.SetConfigName("sshmuxd")
+	viper.SetConfigName("sshfleet")
 	viper.AddConfigPath(".")
-	viper.AddConfigPath("$HOME/.sshmuxd")
-	viper.AddConfigPath("/etc/sshmuxd/")
+	viper.AddConfigPath("$HOME/.sshfleet")
+	viper.AddConfigPath("/etc/sshfleet/")
 
 	viper.SetConfigFile(*configFile)
 
@@ -620,13 +620,13 @@ func main() {
 		panic(err)
 	}
 
-	fleetServer := Server{
-		users: users,
-		nodeUsers: nodeUsers,
-		anyNode: viper.GetBool("anyNode"),
-		anyMaster: viper.GetBool("anyMaster"),
+	fleetServer := server{
+		users:         users,
+		nodeUsers:     nodeUsers,
+		anyNode:       viper.GetBool("anyNode"),
+		anyMaster:     viper.GetBool("anyMaster"),
 		nodeKeepAlive: time.Duration(viper.GetInt("nodeKeepAlive")) * time.Second,
-		clientWaiter: &sync.Cond{L: &sync.Mutex{}},
+		clientWaiter:  &sync.Cond{L: &sync.Mutex{}},
 	}
 
 	fleetServer.sshConfig = &ssh.ServerConfig{
